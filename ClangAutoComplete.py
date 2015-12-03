@@ -6,6 +6,8 @@
 import sublime, sublime_plugin, os, ntpath, subprocess, codecs, re, tempfile
 import os.path as path
 
+import json
+
 class ClangAutoComplete(sublime_plugin.EventListener):
 
 	compl_regex = re.compile("COMPLETION: ([^ ]+) : ([^\\n]+)")
@@ -14,15 +16,29 @@ class ClangAutoComplete(sublime_plugin.EventListener):
 	project_name_regex = re.compile("([^\.]+).sublime-project")
 	settings_time = 0
 
-	def load_settings(self):
-		# Only load the settings if they have changed
-		settings_modified_time = path.getmtime(sublime.packages_path()+"/ClangAutoComplete/"+"ClangAutoComplete.sublime-settings")
-		if (self.settings_time == settings_modified_time):
-			return
+	def get_alldir(self, targetdir, dirlist):
+		for i in os.listdir(targetdir):
+			dir = os.path.join(targetdir,i)
+			if os.path.isdir(dir):
+				dirlist.append(dir)
+				self.get_alldir(dir, dirlist)
 
-		# Variable $project_base_path in settings will be replaced by sublime's project path
-		settings = sublime.load_settings("ClangAutoComplete.sublime-settings")
-		
+	def reload_project_settings(self):
+		project_setting_file = os.path.join(self.project_path, "ClangAutoComplete.sublime-settings")
+		if os.path.isfile(project_setting_file):
+			project_setting = {}
+			with open(project_setting_file) as data_file:
+				project_settings = json.load(data_file)
+				#print(project_settings["include_dirs"])
+				self.project_settings_include = project_settings["include_dirs"]
+				self.project_clang_flags = project_settings["clang_flags"]
+				self.project_folder_include = []
+				if "project_folder_include" in project_settings.keys() \
+					and project_settings["project_folder_include"] :
+					self.get_alldir(str(self.project_path), self.project_folder_include)
+
+	def load_settings(self):
+
 		project_path=""
 		if sublime.active_window().project_data() is not None \
 			and sublime.active_window().project_data().get("folders") is not None \
@@ -30,7 +46,17 @@ class ClangAutoComplete(sublime_plugin.EventListener):
 			project_path = (sublime.active_window().project_data().get("folders")[0].get("path"))
 			if os.name == "nt":
 				project_path = re.sub("(\\\\)", "\\\\\\\\", project_path)
-		
+
+		self.project_path = project_path
+
+		# Only load the settings if they have changed
+		settings_modified_time = path.getmtime(sublime.packages_path()+"/ClangAutoComplete/"+"ClangAutoComplete.sublime-settings")
+		if (self.settings_time == settings_modified_time):
+			return
+
+		# Variable $project_base_path in settings will be replaced by sublime's project path
+		settings = sublime.load_settings("ClangAutoComplete.sublime-settings")
+
 		proj_filename = sublime.active_window().project_file_name()
 		project_name=""
 		if proj_filename is not None:
@@ -59,7 +85,15 @@ class ClangAutoComplete(sublime_plugin.EventListener):
 					self.include_dirs[i] = "\"" + self.include_dirs[i] + "\""
 
 	def on_query_completions(self, view, prefix, locations):
+
 		self.load_settings()
+		self.reload_project_settings()
+
+		include_dirs = []
+		include_dirs += self.include_dirs
+		include_dirs += self.project_settings_include
+		include_dirs += self.project_folder_include
+
 		# Find exact Line:Column position of cursor for clang
 		pos = view.sel()[0].begin()
 		body = view.substr(sublime.Region(0, view.size()))
@@ -105,11 +139,20 @@ class ClangAutoComplete(sublime_plugin.EventListener):
 		clang_flags = "-cc1 " + syntax_flags + " -fsyntax-only"
 		clang_target = "-code-completion-at " + self.tmp_file_path+":"+str(line_pos)+":"+str(char_pos ) +" "+self.tmp_file_path
 		clang_includes=" -I ."
-		for dir in self.include_dirs:
+		for dir in include_dirs:
 			clang_includes += " -I " + dir
 
+		project_clang_flags = ""
+		for project_flag in self.project_clang_flags:
+			project_clang_flags += " " + project_flag
+
 		# Execute clang command, exit 0 to suppress error from check_output()
-		clang_cmd = clang_bin + " " + clang_flags + " " + clang_target + clang_includes
+		clang_cmd = clang_bin + " " + clang_flags + " " + clang_target + clang_includes + project_clang_flags
+		#sublime.message_dialog(clang_cmd)
+		print (clang_cmd)
+		# xcwang test
+		#print(">>>>>>>>>>" , sublime.active_window().project_data().get("folders")[0].get("path"))
+		#
 		try:
 			output = subprocess.check_output(clang_cmd, shell=True)
 			output_text = ''.join(map(chr,output))
